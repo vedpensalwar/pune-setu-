@@ -1,0 +1,434 @@
+// PuneSetu (पुणे सेतू) — Prisma Database Schema
+// Version 4: Database and Backend Foundation
+// Connecting Citizens, Municipal Officers, and PMC Administration across Pune's 15 Prabhag Wards
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -------------------------------------------------------------
+// ENUMS
+// -------------------------------------------------------------
+
+enum Role {
+  CITIZEN
+  MUNICIPAL_OFFICER
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum GrievanceCategory {
+  ROADS_POTHOLES
+  SOLID_WASTE
+  WATER_SUPPLY
+  STREET_LIGHTING
+  SEWAGE_DRAINAGE
+  TRAFFIC_TRANSPORT
+  ENCROACHMENT
+  GARDENS_PARKS
+  HEALTH_SANITATION
+  OTHER
+}
+
+enum GrievancePriority {
+  LOW
+  MEDIUM
+  HIGH
+  EMERGENCY
+}
+
+enum GrievanceStatus {
+  SUBMITTED
+  ASSIGNED
+  IN_PROGRESS
+  RESOLVED
+  REJECTED
+  ESCALATED
+  SLA_BREACHED
+  REOPENED
+}
+
+enum EvidenceType {
+  PHOTO
+  DOCUMENT
+  VIDEO
+}
+
+enum EscalationType {
+  SLA_TIME_EXCEEDED
+  MANUAL_CITIZEN_ESCALATION
+  OFFICER_REASSIGNMENT
+  COMMISSIONER_DIRECTIVE
+}
+
+enum NotificationType {
+  STATUS_CHANGE
+  ASSIGNED
+  COMMENT_ADDED
+  ESCALATED
+  RESOLUTION_VERIFIED
+}
+
+// -------------------------------------------------------------
+// 1. USER & AUTHENTICATION
+// -------------------------------------------------------------
+
+model User {
+  id            String        @id @default(cuid())
+  name          String
+  email         String        @unique
+  passwordHash  String        @map("password_hash")
+  role          Role          @default(CITIZEN)
+  status        AccountStatus @default(ACTIVE)
+
+  // Optional Department & Ward associations (For Officers & Admins)
+  departmentId  String?       @map("department_id")
+  wardId        String?       @map("ward_id")
+  department    Department?   @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  ward          Ward?         @relation(fields: [wardId], references: [id], onDelete: SetNull)
+
+  // Security & tracking
+  emailVerified DateTime?     @map("email_verified")
+  lastLoginAt   DateTime?     @map("last_login_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  // Relationships
+  filedGrievances     Grievance[]              @relation("CitizenGrievances")
+  assignedGrievances  Grievance[]              @relation("OfficerGrievances")
+  statusChanges       GrievanceStatusHistory[] @relation("StatusChanger")
+  comments            Comment[]
+  endorsements        Endorsement[]
+  followedGrievances  GrievanceFollower[]
+  feedbackGiven       SatisfactionFeedback[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  escalationsTriggered EscalationRecord[]      @relation("EscalatedBy")
+  uploadedEvidence    GrievanceEvidence[]
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@map("users")
+}
+
+// -------------------------------------------------------------
+// 2. DEPARTMENT (PMC Administrative Divisions)
+// -------------------------------------------------------------
+
+model Department {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  code        String      @unique
+  description String?
+  active      Boolean     @default(true)
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  officers    User[]
+  grievances  Grievance[]
+
+  @@index([code])
+  @@index([active])
+  @@map("departments")
+}
+
+// -------------------------------------------------------------
+// 3. WARD (15 Administrative Prabhag Divisions of Pune)
+// -------------------------------------------------------------
+
+model Ward {
+  id            String      @id @default(cuid())
+  name          String
+  wardNumber    Int         @unique @map("ward_number")
+  zone          String
+  officeAddress String?     @map("office_address")
+  contactPhone  String?     @map("contact_phone")
+  active        Boolean     @default(true)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  officers      User[]
+  grievances    Grievance[]
+
+  @@index([wardNumber])
+  @@index([active])
+  @@map("wards")
+}
+
+// -------------------------------------------------------------
+// 4. GRIEVANCE (Core Civic Redressal Model)
+// -------------------------------------------------------------
+
+model Grievance {
+  id                  String             @id @default(cuid())
+  trackingToken       String             @unique @map("tracking_token") // PS-PUN-YYYY-XXXXXX
+  title               String
+  description         String
+  category            GrievanceCategory
+  priority            GrievancePriority  @default(MEDIUM)
+  status              GrievanceStatus    @default(SUBMITTED)
+
+  // Geolocation & Address
+  latitude            Float?
+  longitude           Float?
+  landmark            String?
+  locationDescription String?            @map("location_description")
+
+  // Foreign keys & Associations
+  citizenId           String             @map("citizen_id")
+  citizen             User               @relation("CitizenGrievances", fields: [citizenId], references: [id], onDelete: Restrict)
+
+  departmentId        String?            @map("department_id")
+  department          Department?        @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  wardId              String?            @map("ward_id")
+  ward                Ward?              @relation(fields: [wardId], references: [id], onDelete: SetNull)
+
+  assignedOfficerId   String?            @map("assigned_officer_id")
+  assignedOfficer     User?              @relation("OfficerGrievances", fields: [assignedOfficerId], references: [id], onDelete: SetNull)
+
+  // Timestamps & SLA Lifecycle
+  submittedAt         DateTime           @default(now()) @map("submitted_at")
+  deadlineAt          DateTime?          @map("deadline_at")
+  resolvedAt          DateTime?          @map("resolved_at")
+  resolutionNotes     String?            @map("resolution_notes")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  // Relationships
+  evidence            GrievanceEvidence[]
+  statusHistory       GrievanceStatusHistory[]
+  comments            Comment[]
+  endorsements        Endorsement[]
+  followers           GrievanceFollower[]
+  feedback            SatisfactionFeedback?
+  escalations         EscalationRecord[]
+  notifications       Notification[]
+
+  @@index([trackingToken])
+  @@index([citizenId])
+  @@index([departmentId])
+  @@index([wardId])
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@index([createdAt])
+  @@map("grievances")
+}
+
+// -------------------------------------------------------------
+// 5. EVIDENCE METADATA
+// -------------------------------------------------------------
+
+model GrievanceEvidence {
+  id               String       @id @default(cuid())
+  grievanceId      String       @map("grievance_id")
+  grievance        Grievance    @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  evidenceType     EvidenceType @default(PHOTO) @map("evidence_type")
+  storageKey       String       @map("storage_key")
+  originalFilename String?      @map("original_filename")
+  mimeType         String       @map("mime_type")
+  sizeBytes        Int          @map("size_bytes")
+  caption          String?
+
+  uploadedById     String       @map("uploaded_by_id")
+  uploadedBy       User         @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  uploadedAt       DateTime     @default(now()) @map("uploaded_at")
+
+  @@index([grievanceId])
+  @@index([uploadedById])
+  @@map("grievance_evidence")
+}
+
+// -------------------------------------------------------------
+// 6. STATUS HISTORY (Auditable Timeline)
+// -------------------------------------------------------------
+
+model GrievanceStatusHistory {
+  id             String          @id @default(cuid())
+  grievanceId    String          @map("grievance_id")
+  grievance      Grievance       @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  previousStatus GrievanceStatus @map("previous_status")
+  newStatus      GrievanceStatus @map("new_status")
+  changeReason   String?         @map("change_reason")
+  notes          String?
+
+  changedById    String?         @map("changed_by_id")
+  changedBy      User?           @relation("StatusChanger", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt      DateTime        @default(now()) @map("created_at")
+
+  @@index([grievanceId])
+  @@index([createdAt])
+  @@map("grievance_status_history")
+}
+
+// -------------------------------------------------------------
+// 7. COMMENTS & INTERNAL NOTES
+// -------------------------------------------------------------
+
+model Comment {
+  id          String    @id @default(cuid())
+  grievanceId String    @map("grievance_id")
+  grievance   Grievance @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  authorId    String    @map("author_id")
+  author      User      @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  content     String
+  isInternal  Boolean   @default(false) @map("is_internal") // Only visible to Officers & Admins
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([grievanceId])
+  @@index([authorId])
+  @@index([isInternal])
+  @@map("comments")
+}
+
+// -------------------------------------------------------------
+// 8. ENDORSEMENTS (Upvotes with Unique Constraint)
+// -------------------------------------------------------------
+
+model Endorsement {
+  id          String    @id @default(cuid())
+  grievanceId String    @map("grievance_id")
+  grievance   Grievance @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([grievanceId, userId]) // Strictly prevents duplicate endorsement
+  @@index([grievanceId])
+  @@index([userId])
+  @@map("endorsements")
+}
+
+// -------------------------------------------------------------
+// 9. GRIEVANCE FOLLOWER (Notifications on Status Changes)
+// -------------------------------------------------------------
+
+model GrievanceFollower {
+  id          String    @id @default(cuid())
+  grievanceId String    @map("grievance_id")
+  grievance   Grievance @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([grievanceId, userId]) // Strictly prevents duplicate follow relationship
+  @@index([grievanceId])
+  @@index([userId])
+  @@map("grievance_followers")
+}
+
+// -------------------------------------------------------------
+// 10. SATISFACTION FEEDBACK (Rating 1-5 on Resolved Grievances)
+// -------------------------------------------------------------
+
+model SatisfactionFeedback {
+  id           String    @id @default(cuid())
+  grievanceId  String    @unique @map("grievance_id") // One feedback per grievance
+  grievance    Grievance @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  citizenId    String    @map("citizen_id")
+  citizen      User      @relation(fields: [citizenId], references: [id], onDelete: Restrict)
+
+  rating       Int       // Must be 1 to 5
+  feedbackText String?   @map("feedback_text")
+  submittedAt  DateTime  @default(now()) @map("submitted_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@index([citizenId])
+  @@map("satisfaction_feedback")
+}
+
+// -------------------------------------------------------------
+// 11. NOTIFICATIONS
+// -------------------------------------------------------------
+
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String           @map("recipient_id")
+  recipient   User             @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  type        NotificationType
+  title       String
+  message     String
+
+  grievanceId String?          @map("grievance_id")
+  grievance   Grievance?       @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  read        Boolean          @default(false)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  readAt      DateTime?        @map("read_at")
+
+  @@index([recipientId])
+  @@index([read])
+  @@map("notifications")
+}
+
+// -------------------------------------------------------------
+// 12. AUDIT LOG (Immutable Administrative Audit Trail)
+// -------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  action     String   // e.g. "USER_LOGIN", "STATUS_CHANGE", "ADMIN_ELEVATION"
+  targetType String   @map("target_type") // e.g. "Grievance", "User"
+  targetId   String?  @map("target_id")
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  metadata   String?  // JSON stringified payload
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([targetType])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// -------------------------------------------------------------
+// 13. ESCALATION RECORD
+// -------------------------------------------------------------
+
+model EscalationRecord {
+  id             String         @id @default(cuid())
+  grievanceId    String         @map("grievance_id")
+  grievance      Grievance      @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  escalationType EscalationType @map("escalation_type")
+  reason         String
+  status         String         @default("PENDING") // PENDING, REVIEWED, RESOLVED
+
+  escalatedById  String?        @map("escalated_by_id")
+  escalatedBy    User?          @relation("EscalatedBy", fields: [escalatedById], references: [id], onDelete: SetNull)
+
+  triggeredAt    DateTime       @default(now()) @map("triggered_at")
+  resolvedAt     DateTime?      @map("resolved_at")
+
+  @@index([grievanceId])
+  @@index([status])
+  @@map("escalation_records")
+}
